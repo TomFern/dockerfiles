@@ -1,0 +1,111 @@
+https://www.reddit.com/r/PHP/comments/h874q5/how_do_you_build_your_production_docker_images/
+
+Hi,
+
+I'd like to start a discussion about docker images for php projects.
+
+I feel like the resources I find on this topic are not advanced enough https://www.google.com/search?q=php+dockerfile+best+practices
+
+For example, I see a lot of basic example using the apache versions of php image but that's not what most of us are using in a production environment.
+
+I'd like to focus on images built for production only.
+
+Here is the best Dockerfile I can think of, certainly not the best possible but the point of this thread is to collect best practices
+
+I'd start by installing the required extensions and packages and also create a user because I don't want to run php-fpm as root in the end
+
+FROM php:7.4.{exact-version}-fpm-{alpine} as php-base
+
+RUN apk add --no-cache \
+    postgresql-dev \
+    other \
+    necessary \
+    packages \
+    && docker-php-ext-install pdo_pgsql \
+    && docker-php-ext-install xxxx \
+    && mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
+    && addgroup my-app \
+    && adduser -H -D -G my-app my-app
+
+WORKDIR /app
+
+Then I use 2 composer stages, one to install the vendors and the other to dump the autoloader. I do this for the docker build cache. To generate the autoload classmap, composer need the sources (src folder) so it can add the classes of the application in the classmap. On most projects, the sources changes more often than the composer.json and composer.lock files.
+
+For example, If I use this stage in the Dockerfile
+
+FROM composer:{version} as composer
+
+WORKDIR /app
+
+COPY composer.json composer.lock /app/
+COPY src/ /app/src
+
+RUN composer global require hirak/prestissimo \
+    && composer install \
+        --no-interaction \
+        --no-dev \
+        --optimize-autoloader
+
+Then the build need to re-run composer install each time the src folder has changes.
+
+With the solution below the vendors are downloaded only if the composer.json and composer.lock files changes.
+
+FROM composer:{version} as composer-base
+
+WORKDIR /app
+
+COPY composer.json composer.lock /app/
+
+RUN composer global require hirak/prestissimo \
+    && composer install \
+    --no-interaction \
+    --no-dev \
+    --no-autoloader
+
+FROM composer-base as composer-autoload
+
+COPY src/ /app/src
+
+RUN composer dump-autoload \
+    --no-interaction \
+    --no-dev \
+    --classmap-authoritative
+
+Finally the last stage: I add the sources and the vendor folders from the composer stages to the base stage
+
+FROM php-base as production
+
+COPY public/ /app/public
+COPY src/ /app/src
+
+COPY --from=composer-base /app/vendor /app/vendor
+COPY --from=composer-autoload /app/vendor/autoload.php /app/vendor/
+COPY --from=composer-autoload /app/vendor/composer /app/vendor/composer
+
+USER my-app
+
+That's it. Please tell me what you think about this and share insights to improve it !
+
+EDIT: Trying to list all suggestions
+
+    The FROM composer-base as composer-autoload step is (I think) unnecessary (by /u/Pentafloppy)
+
+    Extend the base php stage in the composer stage to avoid platform issues (or use config.platform in your composer.json file
+
+FROM composer:{version} as composer-base
+
+WORKDIR /app
+
+COPY composer.json composer.lock /app/
+
+... rest of the dockerfile ...
+
+Becomes:
+
+FROM php-base as composer-base
+
+COPY --from=composer /usr/bin/composer /usr/bin/composer
+
+COPY composer.json composer.lock /app/
+
+... rest of the dockerfile ...
